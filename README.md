@@ -1,6 +1,6 @@
 # 🚂 YatraGuard — Autonomous Regional Rail Co-Pilot for Indian Elders
 
-> **"My 68-year-old mother recently traveled alone from Mumbai to Nagpur. It was a 14-hour overnight journey. She called me 9 times in panic, asking if her station had arrived. I stayed awake until 3 AM staring at outdated, buggy tracking apps just to make sure she didn't miss her stop. The next morning, I knew there had to be a better way. I started building YatraGuard."**
+> **"We recently watched our elderly neighbor, Sharma Uncle, prepare for an overnight train journey alone. He was visibly anxious, clutching a paper notebook with helpline numbers, and asking anyone nearby how he would know when his station arrived in the middle of the night. His children were constantly calling him, draining his phone battery just to verify his location. Watching this friction, we asked ourselves: Why should travel be terrifying for India's elders when modern orchestration can act as their digital guardian? That morning, YatraGuard was born."**
 
 YatraGuard is a **stateful, long-running Kestra orchestration** that turns a simple WhatsApp message into an autonomous 24-hour travel shield for Indian elders. By replacing high-friction, complicated apps with a **zero-install, multi-lingual WhatsApp thread**, YatraGuard bridges the digital divide, giving elderly passengers absolute autonomy and their families total peace of mind.
 
