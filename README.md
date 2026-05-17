@@ -19,50 +19,23 @@ YatraGuard acts as an **invisible digital guardian**. The moment an elder texts 
 
 ## 🧠 System Architecture & Workflow
 
-YatraGuard is powered by **Kestra's event-driven workflow engine**, coordinating a PostgreSQL state ledger, Groq LLM parsing, Twilio WhatsApp APIs, and a custom automated localized video pipeline:
+YatraGuard is powered by **Kestra's event-driven workflow engine**, coordinating a PostgreSQL state ledger, Groq LLM parsing, Twilio WhatsApp APIs, and a custom automated localized video pipeline. 
 
-```
-                  ┌──────────────────────────────────────────┐
-                  │ PASSENGER: Texts "12951 Delhi" on WhatsApp│
-                  └────────────────────┬─────────────────────┘
-                                       │
-                                       ▼
-                  ┌──────────────────────────────────────────┐
-                  │    Kestra Ingest Webhook Gateway         │
-                  │   (yatraguard-whatsapp-gateway trigger)  │
-                  └────────────────────┬─────────────────────┘
-                                       │
-                                       ▼
-                  ┌──────────────────────────────────────────┐
-                  │    Groq AI Natural Language Engine       │
-                  │  Extracts Train, Destination, Language   │
-                  └────────────────────┬─────────────────────┘
-                                       │
-                                       ▼
-                  ┌──────────────────────────────────────────┐
-                  │      PostgreSQL Active State Ledger      │
-                  │      Registers active passenger trip     │
-                  └────────────────────┬─────────────────────┘
-                                       │
-                                       ▼
-                  ┌──────────────────────────────────────────┐
-                  │   30-Min Stateful Monitoring Cron Loop   │
-                  │   (Queries Live IRCTC RapidAPI Status)   │
-                  └──────┬────────────────────────────┬──────┘
-                         │                            │
-             [Regular Status Update]          [Proximity Wakeup Gate]
-                         │                            │
-                         ▼                            ▼
-                  ┌──────────────┐             ┌──────────────┐
-                  │ Localized WA │             │ Parallel WA  │
-                  │   Status &   │             │ Alerts Fired │
-                  │ Interactive  │             └──────┬───────┘
-                  │  10-Option   │                    │
-                  │     Menu     │             ┌──────┴──────┐
-                  │  Delivered   │             ▼             ▼
-                  └──────────────┘       [Elder Wakeup]  [Family Pickup]
-                                         "Time to pack!" "Leave for station"
-```
+Here is the high-fidelity, non-overlapping architectural layout of the stateful monitoring engine:
+
+![YatraGuard System Architecture](output/yatraguard_system_architecture.svg)
+
+### 🗺️ The Step-by-Step Orchestration Path:
+1. **Passenger Ingestion:** The elderly passenger texts their train number (e.g., `12903`) to the Twilio WhatsApp Number.
+2. **Secure Webhook Tunnel:** Twilio forwards the message via ngrok HTTP tunnel to Kestra Ingest.
+3. **Groq AI Natural Language Engine:** Groq LLM parses the message in real-time, extracting the train number, destination station, and language preference (English, Hindi, or Marathi).
+4. **PostgreSQL Active State Ledger:** Kestra registers the journey as `ACTIVE` inside the database.
+5. **Stateful Monitoring Loop:** Flow 2 wakes up every 30 minutes, querying the PostgreSQL ledger for active trips.
+6. **IRCTC Live Telemetry:** Kestra polls the RapidAPI endpoint to fetch the train's precise location, upcoming station, and delays.
+7. **Proximity Wakeup Gate:** When the train enters a **30km radius** from the target station, Kestra instantly fires:
+   * **Wakeup Alert (to Passenger):** A localized native-language alert telling them their station is approaching.
+   * **Pickup Alert (to Coordinator):** An alert in English sent directly to their family coordinator, telling them the exact arrival time and to leave for the station now.
+8. **Interactive Option 5 Guide:** Passenger can reply **`5`** at any point to receive a high-speed video safety guide in their native language, compiled dynamically by our video pipeline.
 
 ---
 
