@@ -1,0 +1,14 @@
+# Ignore all Kestra workflow files because they contain API keys!
+*.yml
+*.yaml
+
+# Ignore environment variables
+.env
+.env.*
+
+# Ignore database and cache
+*.db
+*.sqlite
+__pycache__/
+
+# We ONLY want to push the videos folder and the README!
