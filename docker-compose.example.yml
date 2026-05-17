@@ -1,0 +1,68 @@
+version: "3"
+
+services:
+  # ── PostgreSQL Database ──────────────────────────────────────────
+  # Serves as the central repository for YatraGuard journey states,
+  # keeping a reliable, queryable ledger of active and completed trips.
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB:       "kestra"
+      POSTGRES_USER:     "kestra"
+      POSTGRES_PASSWORD: "k3str4"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kestra -d kestra"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Kestra Orchestration Server ──────────────────────────────────
+  # The central event-driven orchestration brain running YatraGuard.
+  # Manages the webhooks, python analytics scripts, and live monitoring timers.
+  kestra:
+    image: kestra/kestra:latest
+    command: server local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      # Kestra backend database engine setup
+      KESTRA_CONFIGURATION: |
+        datasources:
+          postgres:
+            url: jdbc:postgresql://postgres:5432/kestra
+            username: kestra
+            password: k3str4
+            driverClassName: org.postgresql.Driver
+
+      # ── YatraGuard Secrets  ────────────────────────────────
+      # Twilio: https://console.twilio.com → Account Info
+      SECRET_TWILIO_ACCOUNT_SID:   "your_twilio_account_sid_here"
+      SECRET_TWILIO_AUTH_TOKEN:    "your_twilio_auth_token_here"
+      # Twilio WhatsApp sandbox number (or your approved WA business number)
+      SECRET_TWILIO_WHATSAPP_FROM: "whatsapp:+14155238886"
+
+      # RapidAPI: https://rapidapi.com → search "IRCTC" → subscribe to irctc1.p.rapidapi.com
+      SECRET_RAPIDAPI_KEY: "your_rapidapi_key_here"
+
+      # Family coordinator phone (the person picking up from station), format: 91XXXXXXXXXX
+      SECRET_FAMILY_PHONE: "91XXXXXXXXXX"
+
+      # Database credentials (must match the postgres service block above)
+      SECRET_DB_USER:     "kestra"
+      SECRET_DB_PASSWORD: "k3str4"
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - kestradata:/app/data
+
+volumes:
+  pgdata:
+  kestradata:

@@ -1,183 +1,179 @@
-# 🚂 YatraGuard — Autonomous Regional Rail Co-Pilot for Elders
+# 🚂 YatraGuard — Autonomous Regional Rail Co-Pilot for Indian Elders
 
-> *"My mom traveled alone from Mumbai to Nagpur. 14 hours. She called me 9 times asking where the train was. I stayed awake till 3 AM to make sure she didn't miss her station. Next morning I started building YatraGuard."*
+> **"My 68-year-old mother recently traveled alone from Mumbai to Nagpur. It was a 14-hour overnight journey. She called me 9 times in panic, asking if her station had arrived. I stayed awake until 3 AM staring at outdated, buggy tracking apps just to make sure she didn't miss her stop. The next morning, I knew there had to be a better way. I started building YatraGuard."**
 
-YatraGuard is a **stateful, long-running Kestra orchestration** that turns a simple WhatsApp message into an autonomous 24-hour travel shield for your parents.
-
-No app to install. Just WhatsApp.
+YatraGuard is a **stateful, long-running Kestra orchestration** that turns a simple WhatsApp message into an autonomous 24-hour travel shield for Indian elders. By replacing high-friction, complicated apps with a **zero-install, multi-lingual WhatsApp thread**, YatraGuard bridges the digital divide, giving elderly passengers absolute autonomy and their families total peace of mind.
 
 ---
 
-## 🧠 How It Works
+## 🛑 The Problem: The High-Friction Travel Crisis
+For millions of senior citizens in India, traveling alone on the massive Indian Railways network is an exhausting, anxiety-inducing experience:
+1. **App Fatigue:** Modern tracking apps are filled with spam ads, require constant internet connectivity, and have complex user interfaces that overwhelm senior citizens.
+2. **The Sleeping Hazard:** Trains frequently run hours late, arriving at destinations in the dead of night. Elders are terrified of oversleeping and missing their stops, leading to sleepless, stressful journeys.
+3. **Communication Blindspots:** Anxious family members constantly call to check on live locations, draining the passenger's phone battery and creating panic if a call goes unanswered.
+
+### 🛡️ The Solution: YatraGuard Impact
+YatraGuard acts as an **invisible digital guardian**. The moment an elder texts their train number on WhatsApp, Kestra spins up a stateful monitoring mesh that tracks their journey in real-time, communicates with them entirely in their native language (**English, Hindi, or Marathi**), and coordinates parallel emergency, safety, and pickup alerts.
+
+---
+
+## 🧠 System Architecture & Workflow
+
+YatraGuard is powered by **Kestra's event-driven workflow engine**, coordinating a PostgreSQL state ledger, Groq LLM parsing, Twilio WhatsApp APIs, and a custom automated localized video pipeline:
 
 ```
-[Parent sends Train Number on WhatsApp]
-              │
-              ▼
-  [Kestra Webhook Ingestion Gateway]
-              │
-              ▼
-     [Groq AI Parsing & Translation]
-   Extracts Train No, Destination, Language
-              │
-              ▼
-   [PostgreSQL Active Journey Ledger]
-   Registers the journey lifecycle
-              │
-              ▼
- [30-Minute Dynamic Monitoring Mesh]
-   Queries IRCTC Live Train Status API
-   Sends localized updates to parent
-              │
-              ▼
-    [Destination Proximity Detection]
-   Train is approaching destination...
-              │
-        ┌─────┴─────┐
-        ▼           ▼
-[WAKE-UP ALARM]  [FAMILY PICKUP DISPATCH]
- Parent's phone   Family coordinator's phone
- in their language fires simultaneously
-```
-
----
-
-## 🆓 100% Free Stack
-
-| Component        | Tool                         | Cost       |
-|------------------|------------------------------|------------|
-| WhatsApp Receive | Twilio Sandbox               | Free       |
-| WhatsApp Send    | Twilio Sandbox               | Free       |
-| Train Live Data  | RapidAPI IRCTC API           | Free tier  |
-| AI Parsing       | Groq (llama3-8b-8192)        | Free       |
-| Database         | PostgreSQL (local via Docker) | Free       |
-| Orchestration    | Kestra                       | Free       |
-| Public Webhook   | ngrok                        | Free       |
-
----
-
-## ⚙️ Setup Instructions
-
-### Step 1 — Get Your API Keys
-
-#### Twilio (WhatsApp Sandbox)
-1. Go to [twilio.com](https://twilio.com) → Sign up free
-2. Navigate to **Messaging → Try it out → Send a WhatsApp message**
-3. Follow the steps to join the sandbox from your phone
-4. Copy your **Account SID** and **Auth Token**
-
-#### RapidAPI (IRCTC Indian Railways)
-1. Go to [rapidapi.com](https://rapidapi.com) → Sign up free
-2. Search for **"IRCTC Indian Railways"** → Subscribe to `irctc1.p.rapidapi.com`
-3. Copy your **RapidAPI Key**
-
----
-
-### Step 2 — Update `docker-compose.yml`
-
-Fill in your secrets in the `kestra` service environment block:
-
-```yaml
-SECRET_TWILIO_ACCOUNT_SID: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-SECRET_TWILIO_AUTH_TOKEN:  "your_twilio_auth_token"
-SECRET_RAPIDAPI_KEY:       "your_rapidapi_key"
-SECRET_FAMILY_PHONE:       "91XXXXXXXXXX"   # No + prefix
+                  ┌──────────────────────────────────────────┐
+                  │ PASSENGER: Texts "12951 Delhi" on WhatsApp│
+                  └────────────────────┬─────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │    Kestra Ingest Webhook Gateway         │
+                  │   (yatraguard-whatsapp-gateway trigger)  │
+                  └────────────────────┬─────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │    Groq AI Natural Language Engine       │
+                  │  Extracts Train, Destination, Language   │
+                  └────────────────────┬─────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │      PostgreSQL Active State Ledger      │
+                  │      Registers active passenger trip     │
+                  └────────────────────┬─────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │   30-Min Stateful Monitoring Cron Loop   │
+                  │   (Queries Live IRCTC RapidAPI Status)   │
+                  └──────┬────────────────────────────┬──────┘
+                         │                            │
+             [Regular Status Update]          [Proximity Wakeup Gate]
+                         │                            │
+                         ▼                            ▼
+                  ┌──────────────┐             ┌──────────────┐
+                  │ Localized WA │             │ Parallel WA  │
+                  │   Status &   │             │ Alerts Fired │
+                  │ Interactive  │             └──────┬───────┘
+                  │  10-Option   │                    │
+                  │     Menu     │             ┌──────┴──────┐
+                  │  Delivered   │             ▼             ▼
+                  └──────────────┘       [Elder Wakeup]  [Family Pickup]
+                                         "Time to pack!" "Leave for station"
 ```
 
 ---
 
-### Step 3 — Start the Stack
+## 🏆 Key Features & Technical Innovation
 
+### 1. 🎞️ Fully Automated Localized Video Asset Pipeline (`build_assets.py`)
+To ensure elders understand how to stay safe, YatraGuard features an **automated video generation pipeline**. Powered by `gTTS`, `moviepy`, and `pillow`, the script programmatically compiles high-resolution, localized travel safety videos with dynamic voiceovers, text overlays, and assets in **English, Hindi, and Marathi**. These assets are hosted on direct high-speed CDNs for instant, zero-buffer playback inside WhatsApp!
+
+### 2. 🎧 AI Storyteller (Regional Station Folklore)
+Long train journeys can be incredibly boring. Replying **`9`** triggers our **AI Storyteller**. Kestra queries the passenger's current or upcoming station from PostgreSQL and prompts Groq to generate a beautiful, 2-sentence cultural myth, historical story, or local culinary fact about that specific station, keeping the elder engaged and connected to the rich heritage of their route.
+
+### 3. 🚨 Proximity-Triggered Parallel Dispatch
+When the live IRCTC telemetry indicates the train is entering a **30km radius** from the destination, Kestra instantly breaks the regular status loop and triggers a **dual-alarm dispatch**:
+*   **The Passenger Alert:** Sends a native-language emergency wakeup alert advising the passenger to gather their luggage and stay calm.
+*   **The Coordinator Alert:** Sends a pickup alert to the family member (always in English) showing the train's precise delay, telling them to leave for the railway station immediately.
+
+---
+
+## 📂 Repository Structure
+
+```text
+rail-copilot-kestra/
+├── docker-compose.example.yml   # Template local dev stack (Kestra + Postgres)
+├── build_assets.py              # Automated localized MP4 video generator pipeline
+├── .gitignore                   # Keeps production environment & API keys strictly local
+├── README.md                    # Product & Technical Master Documentation
+├── presentation_script.md       # Interactive live demo & presentation script
+└── workflows/                   # Sanitized, git-tracked Kestra Workflows
+    ├── yatraguard-ingest.yml    # Flow 1: Ingestion, NLP parsing & interactive command router
+    ├── yatraguard-monitor.yml   # Flow 2: Live IRCTC polling, proximity gate, & alert mesh
+    └── yatraguard-cleanup.yml   # Flow 3: Daily statistics, stale journey purges & logs
+```
+
+---
+
+## 🛠️ Step-by-Step Installation & Setup
+
+### Step 1 — Clone and Configure Environment
+1. Copy `docker-compose.example.yml` in the root directory to a new file named `docker-compose.yml`:
+   ```bash
+   cp docker-compose.example.yml docker-compose.yml
+   ```
+2. Open `docker-compose.yml` and plug in your operational secrets in the Kestra environment block:
+   ```yaml
+   SECRET_TWILIO_ACCOUNT_SID:   "your_twilio_account_sid"
+   SECRET_TWILIO_AUTH_TOKEN:    "your_twilio_auth_token"
+   SECRET_TWILIO_WHATSAPP_FROM: "whatsapp:+14155238886" # Twilio Sandbox Number
+   SECRET_RAPIDAPI_KEY:         "your_rapidapi_key"         # For IRCTC live updates
+   SECRET_FAMILY_PHONE:         "91XXXXXXXXXX"               # Pickup Coordinator
+   ```
+
+### Step 2 — Start the Infrastructure Stack
+Spin up the local Docker network (runs Kestra and PostgreSQL concurrently):
 ```powershell
 docker compose up -d
 ```
+Verify the stack is operational by opening the Kestra GUI at [http://localhost:8080](http://localhost:8080).
 
-Verify Kestra is running at [http://localhost:8080](http://localhost:8080)
-
----
-
-### Step 4 — Expose Webhook with ngrok
-
+### Step 3 — Expose Your Local Gateway to Twilio
+Twilio needs a public gateway to forward incoming WhatsApp messages to Kestra. Use `ngrok` to tunnel port 8080:
 ```powershell
 ngrok http 8080
 ```
+Copy the generated public URL (e.g. `https://xxxx-xxxx.ngrok-free.app`).
 
-Copy the `https://xxxx.ngrok.io` URL.
+### Step 4 — Configure Webhook on Twilio Console
+1. Go to your **Twilio Console** → **Messaging** → **Send a WhatsApp Message** (Sandbox).
+2. Under **Sandbox Settings**, paste the following URL into the **"When a message comes in"** box (ensure method is set to **POST**):
+   ```text
+   https://<your_ngrok_domain>/api/v1/executions/webhook/yatraguard/yatraguard-ingest/yatraguard-whatsapp-gateway
+   ```
 
----
-
-### Step 5 — Import Flows into Kestra
-
-In the Kestra UI at [http://localhost:8080](http://localhost:8080):
-1. Go to **Flows → Create**
-2. Paste the contents of each YAML file:
-   - `yatraguard-ingest.yml`
-   - `yatraguard-monitor.yml`
-   - `yatraguard-cleanup.yml`
-3. Save all three flows
-
----
-
-### Step 6 — Configure Twilio Webhook
-
-In Twilio Console → **WhatsApp Sandbox Settings** → set **"When a message comes in"** to:
-
-```
-https://xxxx.ngrok.io/api/v1/executions/webhook/yatraguard/yatraguard-ingest/yatraguard-whatsapp-gateway
-```
+### Step 5 — Import and Deploy Kestra Flows
+1. In the Kestra GUI, navigate to **Flows** → **Create**.
+2. Create three flows and paste the sanitized workflows located inside the `workflows/` directory:
+   *   `workflows/yatraguard-ingest.yml` (Flow 1)
+   *   `workflows/yatraguard-monitor.yml` (Flow 2)
+   *   `workflows/yatraguard-cleanup.yml` (Flow 3)
+3. Click **Save** on all three flows.
 
 ---
 
-### Step 7 — Test It!
+## 📱 Interactive Command Reference
 
-Send a WhatsApp message to your Twilio sandbox number:
+Once registered, passengers can control their digital co-pilot simply by typing options **`0` through `9`** in their WhatsApp thread:
 
-```
-12952 Nagpur
-```
-
-or in Hindi:
-
-```
-ट्रेन 12952 नागपुर जा रही हूँ
-```
-
-Watch YatraGuard:
-1. ✅ Parse the train number and destination
-2. ✅ Register the journey in the database
-3. ✅ Send a confirmation back in your language
-4. ✅ Start the 30-minute monitoring loop
-5. ✅ Fire parallel wake-up + pickup alerts when approaching
+| Command | Action | Hindi Translation Output | Marathi Translation Output |
+|:---:|---|---|---|
+| **`1`** | **📍 Live Train Status** | लाइव स्थिति + AI यात्रा सलाह | लाइव्ह स्थिती + AI प्रवास सल्ला |
+| **`2`** | **🛑 Stop Tracking** | ट्रैकिंग बंद कर दी गई है | ट्रॅकिंग थांबवले आहे |
+| **`3`** | **🚨 Emergency Alert** | परिवार को अलर्ट भेजा गया है | कुटुंबाला आणीबाणी सूचना पाठवली |
+| **`4`** | **📞 Railway Helpline** | 139 हेल्पलाइन कार्ड | 139 हेल्पलाईन कार्ड |
+| **`5`** | **ℹ️ Safety Video Guide** | स्थानिक रेल्वे मार्गदर्शक व्हिडिओ | स्थानिक रेल्वे मार्गदर्शक व्हिडिओ |
+| **`6`** | **💬 Call Request** | परिवार को कॉल करने का संदेश | कुटुंबाला कॉल करण्याचा निरोप |
+| **`7`** | **👮 Railway Police (RPF)** | आरपीएफ सुरक्षा सहायता डायल | आरपीएफ सुरक्षा मदत डायल |
+| **`8`** | **🍔 Order Seat Food** | IRCTC ई-केटरिंग मेनूकार्ड | IRCTC ई-कॅटरिंग मेनूकार्ड |
+| **`9`** | **🎧 AI Storyteller** | स्टेशन का इतिहास व संस्कृति | स्टेशनचा इतिहास व संस्कृती |
+| **`0`** | **🎲 Travel Games/Trivia** | खेल, पहेलियां और रेलवे सामान्य ज्ञान | खेळ, कोडी आणि रेल्वे सामान्य ज्ञान |
 
 ---
 
-## 📂 File Structure
+## ⚡ The Kestra Showpiece: Why This Wins Hackathons
 
-```
-rail-copilot-kestra/
-├── docker-compose.yml         # Docker stack with all secrets
-├── yatraguard-ingest.yml      # Flow 1: WhatsApp → Parse → Register → Confirm
-├── yatraguard-monitor.yml     # Flow 2: 30-min loop → Live data → Alerts
-├── yatraguard-cleanup.yml     # Flow 3: Daily cleanup & analytics
-└── README.md
-```
+YatraGuard is a masterclass in **Kestra's advanced capabilities**, proving it is the ultimate orchestrator for complex, event-driven consumer tech:
 
----
-
-## 🏆 Why This Wins
-
-This project showcases **every advanced Kestra capability**:
-
-| Kestra Feature                 | Used In YatraGuard                            |
-|--------------------------------|-----------------------------------------------|
-| Long-running stateful workflow | 24-hour journey monitoring loop               |
-| Webhook trigger                | WhatsApp message ingestion                    |
-| Schedule trigger               | 30-min monitoring + daily cleanup             |
-| Python Script tasks            | AI parsing, API calls, DB operations          |
-| PostgreSQL plugin              | Journey state persistence                     |
-| Secret management              | All API keys secured                          |
-| Parallel execution concept     | Wake-up alarm + pickup dispatch simultaneously |
+*   **Long-Running Stateful Orchestration:** Leverages Kestra's ability to maintain active state over a 24-hour period, waking up every 30 minutes to dynamically mutate the state of journeys from `ACTIVE` to `ARRIVING` to `COMPLETED`.
+*   **Webhook Gateway Ingestion:** Processes highly asynchronous, URL-encoded incoming webhook payloads directly from Twilio, parsing complex forms dynamically inside Python script containers.
+*   **PostgreSQL Native Integrations:** Seamlessly updates and queries persistent relational databases in milliseconds to control flow gates.
+*   **Language-Agnostic Python Tasks:** Runs robust script boxes to execute Groq LLM API integrations and dynamic localized text fallbacks.
+*   **Pebble Templating Prowess:** Demonstrates complex condition trees, timezone localizations, and JSON filters directly inside the YAML layer.
 
 ---
 
-*Built with ❤️ to give Indian families peace of mind.*
+*Built with ❤️ to give Indian families peace of mind and keep our parents safe on the rails.*

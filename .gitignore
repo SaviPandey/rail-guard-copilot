@@ -1,14 +1,23 @@
-# Ignore all Kestra workflow files because they contain API keys!
-*.yml
-*.yaml
+# Exclude active local operational configurations containing private keys
+/docker-compose.yml
+/yatraguard-ingest.yml
+/yatraguard-monitor.yml
+/yatraguard-cleanup.yml
 
-# Ignore environment variables
+# Environment variable files
 .env
 .env.*
+local.env
 
-# Ignore database and cache
+# Python build and cache artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Databases and local state persistent storage
 *.db
 *.sqlite
-__pycache__/
-
-# We ONLY want to push the videos folder and the README!
+pgdata/
+kestradata/

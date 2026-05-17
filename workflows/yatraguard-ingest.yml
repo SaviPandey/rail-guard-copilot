@@ -1,0 +1,523 @@
+id: yatraguard-ingest
+namespace: yatraguard
+description: |
+  🚂 YatraGuard Flow 1: WhatsApp Ingestion & Command Gateway
+  Handles two types of incoming messages:
+  A) New journey: "12952 Nagpur" → Parse → Register → Send confirmation + menu
+  B) Command reply: "1" / "2" / "3" → Status check / Stop tracking / Emergency alert
+  Supports English, Hindi, Marathi
+
+triggers:
+  - id: whatsapp_webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: yatraguard-whatsapp-gateway
+
+tasks:
+  - id: log_received
+    type: io.kestra.plugin.core.log.Log
+    allowFailure: true
+    message: "📲 Incoming WhatsApp webhook received"
+
+  - id: route_and_handle
+    type: io.kestra.plugin.scripts.python.Script
+    beforeCommands:
+      - pip install psycopg2-binary kestra --quiet
+    env:
+      GROQ_API_KEY:         "your_groq_api_key_here"
+      TWILIO_ACCOUNT_SID:   "your_twilio_account_sid_here"
+      TWILIO_AUTH_TOKEN:    "your_twilio_auth_token_here"
+      TWILIO_WHATSAPP_FROM: "whatsapp:+14155238886"
+      FAMILY_PHONE:         "your_family_phone_here"
+      DB_HOST:              "host.docker.internal"
+      DB_NAME:              "kestra"
+      DB_USER:              "kestra"
+      DB_PASSWORD:          "k3str4"
+      RAW_BODY:             "{{ trigger.body | json }}"
+      RAW_MESSAGE:          ""
+      PARENT_PHONE:         ""
+    script: |
+      import json, os, urllib.request, urllib.parse, base64, psycopg2
+      from kestra import Kestra
+
+      GROQ_KEY     = os.environ['GROQ_API_KEY']
+      TWILIO_SID   = os.environ['TWILIO_ACCOUNT_SID']
+      TWILIO_TOK   = os.environ['TWILIO_AUTH_TOKEN']
+      TWILIO_FROM  = os.environ['TWILIO_WHATSAPP_FROM']
+      FAMILY_PH    = os.environ['FAMILY_PHONE']
+      DB_HOST      = os.environ['DB_HOST']
+      DB_NAME      = os.environ['DB_NAME']
+      DB_USER      = os.environ['DB_USER']
+      DB_PASSWORD  = os.environ['DB_PASSWORD']
+
+      # Parse Twilio form-encoded body from raw trigger.body
+      RAW_BODY = os.environ.get('RAW_BODY', '')
+      try:
+          # Kestra may pass body as JSON-serialized map: {"Body": "...", "From": "..."}
+          _parsed_json = json.loads(RAW_BODY)
+          RAW_MSG    = str(_parsed_json.get('Body', '')).strip()
+          PARENT_RAW = str(_parsed_json.get('From', ''))
+      except Exception:
+          # Fallback: Kestra passed raw URL-encoded string
+          _parsed_form = urllib.parse.parse_qs(RAW_BODY, keep_blank_values=True)
+          RAW_MSG    = _parsed_form.get('Body', [''])[0].strip()
+          PARENT_RAW = _parsed_form.get('From', [''])[0]
+
+      print(f"RAW_MSG='{RAW_MSG}'  PARENT_RAW='{PARENT_RAW}'")
+      parent_phone = PARENT_RAW.replace('whatsapp:', '').replace('+', '').strip()
+
+      # Helpers
+      def send_whatsapp(to_phone: str, message: str, media_url: str = None):
+          import time
+          time.sleep(1.5)  # Pace the execution to respect Twilio Sandbox rate limits
+          
+          url  = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json"
+          auth = base64.b64encode(f"{TWILIO_SID}:{TWILIO_TOK}".encode()).decode()
+          
+          payload = {
+              "From": TWILIO_FROM,
+              "To":   f"whatsapp:+{to_phone}",
+              "Body": message
+          }
+          if media_url:
+              payload["MediaUrl"] = media_url
+              
+          data = urllib.parse.urlencode(payload).encode()
+          req = urllib.request.Request(url, data=data, headers={
+              "Authorization": f"Basic {auth}",
+              "Content-Type":  "application/x-www-form-urlencoded"
+          })
+          try:
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  return json.loads(r.read())
+          except Exception as e:
+              print(f"WhatsApp error: {e}")
+
+      def call_groq(prompt: str) -> str:
+          payload = json.dumps({
+              "model": "llama-3.1-8b-instant",
+              "messages": [{"role": "user", "content": prompt}],
+              "max_tokens": 300
+          }).encode()
+          req = urllib.request.Request(
+              "https://api.groq.com/openai/v1/chat/completions",
+              data=payload,
+              headers={
+                  "Authorization": f"Bearer {GROQ_KEY}",
+                  "Content-Type":  "application/json",
+                  "User-Agent":    "YatraGuard/1.0"
+              }
+          )
+          with urllib.request.urlopen(req, timeout=20) as r:
+              return json.loads(r.read())['choices'][0]['message']['content']
+
+      def get_db():
+          return psycopg2.connect(
+              host=DB_HOST, port=5432,
+              dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD
+          )
+
+      def ensure_table(cur):
+          cur.execute("""
+              CREATE TABLE IF NOT EXISTS yg_journeys (
+                  id              SERIAL PRIMARY KEY,
+                  train_number    TEXT,
+                  parent_phone    TEXT,
+                  family_phone    TEXT,
+                  destination     TEXT,
+                  language        TEXT    DEFAULT 'English',
+                  status          TEXT    DEFAULT 'ACTIVE',
+                  current_station TEXT,
+                  next_station    TEXT,
+                  delay_mins      INTEGER DEFAULT 0,
+                  started_at      TIMESTAMP DEFAULT NOW(),
+                  last_updated    TIMESTAMP DEFAULT NOW()
+              )
+          """)
+          cur.execute("ALTER TABLE yg_journeys ADD COLUMN IF NOT EXISTS train_name TEXT DEFAULT 'Train'")
+
+      # Menu Templates
+      VIDEO_GUIDELINES = {
+          "English": "https://files.catbox.moe/4s49xc.mp4",
+          "Hindi":   "https://files.catbox.moe/pgu0xl.mp4",
+          "Marathi": "https://files.catbox.moe/wwu5y6.mp4"
+      }
+
+      MENUS = {
+          "English": (
+              "\n\n━━━━━━━━━━━━━━━━━━━━\n"
+              "📋 *Quick Commands*\n"
+              "━━━━━━━━━━━━━━━━━━━━\n"
+              "Reply *1* — 📍 Check current train status\n"
+              "Reply *2* — 🛑 Stop tracking this journey\n"
+              "Reply *3* — 🚨 Send emergency alert to family\n"
+              "Reply *4* — 📞 Railway Helpline (139)\n"
+              "Reply *5* — ℹ️ How does this work?\n"
+              "Reply *6* — 💬 Ask family to call (Non-emergency)\n"
+              "Reply *7* — 👮 Railway Police (RPF) Support\n"
+              "Reply *8* — 🍔 Order Food (IRCTC eCatering)\n"
+              "Reply *9* — 🎧 AI Storyteller (Next Station Fact)\n"
+              "Reply *0* — 🎲 Pass the Time (Travel Games & Trivia)"
+          ),
+          "Hindi": (
+              "\n\n━━━━━━━━━━━━━━━━━━━━\n"
+              "📋 *त्वरित आदेश (Quick Commands)*\n"
+              "━━━━━━━━━━━━━━━━━━━━\n"
+              "*1* लिखें — 📍 ट्रेन की मौजूदा स्थिति देखें\n"
+              "*2* लिखें — 🛑 ट्रैकिंग बंद करें\n"
+              "*3* लिखें — 🚨 परिवार को आपातकालीन अलर्ट भेजें\n"
+              "*4* लिखें — 📞 रेलवे हेल्पलाइन (139)\n"
+              "*5* लिखें — ℹ️ यह कैसे काम करता है?\n"
+              "*6* लिखें — 💬 परिवार को कॉल करने के लिए कहें\n"
+              "*7* लिखें — 👮 रेलवे पुलिस (RPF) सहायता\n"
+              "*8* लिखें — 🍔 खाना ऑर्डर करें (eCatering)\n"
+              "*9* लिखें — 🎧 AI स्टोरीटेलर (अगले स्टेशन की कहानी)\n"
+              "*0* लिखें — 🎲 टाइमपास (यात्रा खेल और पहेलियां)"
+          ),
+          "Marathi": (
+              "\n\n━━━━━━━━━━━━━━━━━━━━\n"
+              "📋 *त्वरित आदेश (Quick Commands)*\n"
+              "━━━━━━━━━━━━━━━━━━━━\n"
+              "*1* लिहा — 📍 ट्रेनची सध्याची स्थिती पाहा\n"
+              "*2* लिहा — 🛑 ट्रॅकिंग थांबवा\n"
+              "*3* लिहा — 🚨 कुटुंबाला आणीबाणी सूचना पाठवा\n"
+              "*4* लिहा — 📞 रेल्वे हेल्पलाइन (139)\n"
+              "*5* लिहा — ℹ️ हे कसे काम करते?\n"
+              "*6* लिहा — 💬 कुटुंबाला कॉल करायला सांगा\n"
+              "*7* लिहा — 👮 रेल्वे पोलीस (RPF) मदत\n"
+              "*8* लिहा — 🍔 जेवण ऑर्डर करा (eCatering)\n"
+              "*9* लिहा — 🎧 AI स्टोरीटेलर (पुढील स्टेशनची माहिती)\n"
+              "*0* लिहा — 🎲 टाईमपास (प्रवास खेळ आणि कोडी)"
+          ),
+      }
+
+      # ROUTE: Is this a command reply (0-9)?
+      is_command = RAW_MSG in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']
+
+      conn = get_db()
+      cur  = conn.cursor()
+      ensure_table(cur)
+      conn.commit()
+
+      if is_command:
+          # Find the most recent active journey for this parent
+          cur.execute("""
+              SELECT id, train_number, train_name, destination, language, current_station, next_station, delay_mins
+              FROM yg_journeys
+              WHERE parent_phone = %s AND status = 'ACTIVE'
+              ORDER BY started_at DESC LIMIT 1
+          """, (parent_phone,))
+          row = cur.fetchone()
+
+          if not row:
+              send_whatsapp(parent_phone,
+                  "⚠️ No active journey found.\n\n"
+                  "Send your train number and destination to start tracking.\n"
+                  "Example: *12952 Nagpur*"
+              )
+              Kestra.outputs({"action": "no_active_journey"})
+          else:
+              jid, train_no, train_name_db, destination, language, curr_stn, next_stn, delay = row
+              lang = language or "English"
+              menu = MENUS.get(lang, MENUS["English"])
+              t_name = train_name_db or "Train"
+
+              if RAW_MSG == '1':
+                  # STATUS CHECK
+                  delay_text = {
+                      "English": "On time ✅" if delay == 0 else f"{delay} min late ⚠️",
+                      "Hindi":   "समय पर ✅"  if delay == 0 else f"{delay} मिनट देरी ⚠️",
+                      "Marathi": "वेळेत ✅"    if delay == 0 else f"{delay} मिनिट उशीर ⚠️",
+                  }.get(lang, "On time ✅")
+
+                  # AI COMPANION
+                  # Generate a dynamic, hyper-personalized AI tip to make it unique
+                  ai_prompt = (
+                      f"You are a friendly Indian travel companion. The user is on train {train_no} heading to {destination}. "
+                      f"The train is currently {delay} minutes late. "
+                      f"Write exactly 1 short, engaging sentence in {lang} to cheer them up or give a contextual travel tip. "
+                      f"Include a relevant emoji. No markdown, just the sentence."
+                  )
+                  try:
+                      ai_tip = call_groq(ai_prompt).strip()
+                  except Exception:
+                      ai_tip = "✨ Have a safe and wonderful journey!"
+
+                  status_msgs = {
+                      "English": (
+                          f"📍 *LIVE STATUS — {t_name} ({train_no})*\n\n"
+                          f"┌─────────────────────┐\n"
+                          f"  🟢 Current : *{curr_stn or 'Fetching...'}*\n"
+                          f"  ⏭️ Next    : *{next_stn or 'Fetching...'}*\n"
+                          f"  ⏱️ Status  : {delay_text}\n"
+                          f"  🏁 Dest    : *{destination}*\n"
+                          f"└─────────────────────┘\n\n"
+                          f"🤖 *AI Travel Companion:*\n_{ai_tip}_"
+                      ),
+                      "Hindi": (
+                          f"📍 *लाइव स्थिति — {t_name} ({train_no})*\n\n"
+                          f"┌─────────────────────┐\n"
+                          f"  🟢 अभी   : *{curr_stn or 'जानकारी आ रही है...'}*\n"
+                          f"  ⏭️ अगला  : *{next_stn or 'जानकारी आ रही है...'}*\n"
+                          f"  ⏱️ स्थिति : {delay_text}\n"
+                          f"  🏁 गंतव्य : *{destination}*\n"
+                          f"└─────────────────────┘\n\n"
+                          f"🤖 *AI ट्रैवल साथी:*\n_{ai_tip}_"
+                      ),
+                      "Marathi": (
+                          f"📍 *लाइव्ह स्थिती — {t_name} ({train_no})*\n\n"
+                          f"┌─────────────────────┐\n"
+                          f"  🟢 सध्या : *{curr_stn or 'माहिती येत आहे...'}*\n"
+                          f"  ⏭️ पुढे   : *{next_stn or 'माहिती येत आहे...'}*\n"
+                          f"  ⏱️ स्थिती : {delay_text}\n"
+                          f"  🏁 गंतव्य : *{destination}*\n"
+                          f"└─────────────────────┘\n\n"
+                          f"🤖 *AI ट्रॅव्हल साथी:*\n_{ai_tip}_"
+                      ),
+                  }
+                  msg = status_msgs.get(lang, status_msgs["English"]) + menu
+                  send_whatsapp(parent_phone, msg)
+                  Kestra.outputs({"action": "status_sent", "journey_id": str(jid)})
+
+              elif RAW_MSG == '2':
+                  # STOP TRACKING
+                  cur.execute("UPDATE yg_journeys SET status='STOPPED' WHERE id=%s", (jid,))
+                  conn.commit()
+                  stop_msgs = {
+                      "English": f"🛑 Tracking for Train *{train_no}* has been stopped.\n\nSafe travels! 🙏",
+                      "Hindi":   f"🛑 ट्रेन *{train_no}* की ट्रैकिंग बंद कर दी गई है।\n\nशुभ यात्रा! 🙏",
+                      "Marathi": f"🛑 ट्रेन *{train_no}* चे ट्रॅकिंग थांबवले आहे।\n\nशुभ प्रवास! 🙏",
+                  }
+                  send_whatsapp(parent_phone, stop_msgs.get(lang, stop_msgs["English"]))
+                  Kestra.outputs({"action": "tracking_stopped", "journey_id": str(jid)})
+
+              elif RAW_MSG == '3':
+                  # EMERGENCY ALERT
+                  emergency_parent = {
+                      "English": f"🚨 *Emergency alert sent to your family!*\n\nThey have been notified immediately. Stay calm. 🙏",
+                      "Hindi":   f"🚨 *आपातकालीन अलर्ट आपके परिवार को भेज दिया गया है!*\n\nवे तुरंत सूचित हो गए हैं। शांत रहें। 🙏",
+                      "Marathi": f"🚨 *आणीबाणी सूचना तुमच्या कुटुंबाला पाठवली गेली आहे!*\n\nते ताबडतोब सूचित झाले आहेत. शांत राहा. 🙏",
+                  }
+                  family_alert = (
+                      f"🚨 *EMERGENCY — YatraGuard*\n\n"
+                      f"Your family member on *{t_name} ({train_no})* "
+                      f"heading to *{destination}* has sent an emergency alert!\n\n"
+                      f"📍 *Last Known Location:* {curr_stn or 'Data pending'}\n"
+                      f"⏭️ *Next Stop:* {next_stn or 'Data pending'}\n\n"
+                      f"📞 Please call them immediately at: *+{parent_phone}*"
+                  )
+                  send_whatsapp(parent_phone, emergency_parent.get(lang, emergency_parent["English"]))
+                  send_whatsapp(FAMILY_PH, family_alert)
+                  Kestra.outputs({"action": "emergency_sent", "journey_id": str(jid)})
+              elif RAW_MSG == '4':
+                  # HELPLINE
+                  help_msgs = {
+                      "English": "📞 *Indian Railways Helpline*\n\n┌─────────────────────┐\n  ☎️ Dial *139* from your phone\n  24/7 immediate assistance\n└─────────────────────┘",
+                      "Hindi":   "📞 *भारतीय रेलवे हेल्पलाइन*\n\n┌─────────────────────┐\n  ☎️ अपने फोन से *139* डायल करें\n  24/7 तत्काल रेलवे सहायता\n└─────────────────────┘",
+                      "Marathi": "📞 *भारतीय रेल्वे हेल्पलाइन*\n\n┌─────────────────────┐\n  ☎️ तुमच्या फोनवरून *139* डायल करा\n  24/7 तात्काळ रेल्वे मदत\n└─────────────────────┘",
+                  }
+                  send_whatsapp(parent_phone, help_msgs.get(lang, help_msgs["English"]) + menu)
+                  Kestra.outputs({"action": "helpline_sent", "journey_id": str(jid)})
+
+              elif RAW_MSG == '5':
+                  # HELP INFO & VIDEO GUIDELINES
+                  info_msgs = {
+                      "English": "ℹ️ *How YatraGuard Works*\n\n┌─────────────────────┐\n  📡 Tracks train via IRCTC\n  🔔 Updates every 30 mins\n  ⏰ Wake-up alarm at 30km\n  🚨 Auto-alerts to family\n└─────────────────────┘\n\n🎥 _Watch this short video guide on safe rail travel tips above!_ 🛡️",
+                      "Hindi":   "ℹ️ *YatraGuard कैसे काम करता है*\n\n┌─────────────────────┐\n  📡 IRCTC के जरिए ट्रैकिंग\n  🔔 हर 30 मिनट में अपडेट\n  ⏰ 30 किमी पहले जगाने का अलार्म\n  🚨 परिवार को ऑटो-अलर्ट\n└─────────────────────┘\n\n🎥 _ऊपर दिए गए छोटे वीडियो में सुरक्षित रेल यात्रा के नियम देखें!_ 🛡️",
+                      "Marathi": "ℹ️ *YatraGuard कसे काम करते*\n\n┌─────────────────────┐\n  📡 IRCTC द्वारे ट्रॅकिंग\n  🔔 दर 30 मिनिटांनी अपडेट\n  ⏰ 30 किमी आधी अलार्म\n  🚨 कुटुंबाला ऑटो-अलर्ट\n└─────────────────────┘\n\n🎥 _वर दिलेल्या छोट्या व्हिडिओमध्ये सुरक्षित रेल्वे प्रवासाचे नियम पहा!_ 🛡️",
+                  }
+                  selected_video = VIDEO_GUIDELINES.get(lang, VIDEO_GUIDELINES["English"])
+                  send_whatsapp(parent_phone, info_msgs.get(lang, info_msgs["English"]) + menu, media_url=selected_video)
+                  Kestra.outputs({"action": "info_video_sent", "journey_id": str(jid)})
+              elif RAW_MSG == '6':
+                  # NON-EMERGENCY CALLBACK
+                  callback_parent = {
+                      "English": "💬 *Message sent to your family!*\n\nWe have asked them to call you when they are free. 📞",
+                      "Hindi":   "💬 *आपके परिवार को संदेश भेज दिया गया है!*\n\nहमने उनसे कहा है कि वे फ्री होने पर आपको कॉल करें। 📞",
+                      "Marathi": "💬 *तुमच्या कुटुंबाला संदेश पाठवला आहे!*\n\nआम्ही त्यांना मोकळे झाल्यावर कॉल करायला सांगितले आहे. 📞",
+                  }
+                  family_msg = (
+                      f"💬 *MESSAGE — YatraGuard*\n\n"
+                      f"Your family member on *{t_name} ({train_no})* "
+                      f"is asking you to call them when you are free.\n\n"
+                      f"📍 *Current Location:* {curr_stn or 'Data pending'}\n"
+                      f"🏁 *Heading to:* {destination}\n\n"
+                      f"(This is not an emergency, just a regular check-in)\n"
+                      f"📞 Call them at: *+{parent_phone}*"
+                  )
+                  send_whatsapp(parent_phone, callback_parent.get(lang, callback_parent["English"]) + menu)
+                  send_whatsapp(FAMILY_PH, family_msg)
+                  Kestra.outputs({"action": "callback_sent", "journey_id": str(jid)})
+
+              elif RAW_MSG == '7':
+                  # POLICE / RPF
+                  rpf_msgs = {
+                      "English": "👮 *Railway Police (RPF)*\n\n┌─────────────────────┐\n  🚨 Dial *139* or *112* for Police\n  🛡️ Immediate Security Help\n└─────────────────────┘",
+                      "Hindi":   "👮 *रेलवे पुलिस (RPF)*\n\n┌─────────────────────┐\n  🚨 पुलिस के लिए *139* या *112* डायल करें\n  🛡️ तत्काल सुरक्षा सहायता\n└─────────────────────┘",
+                      "Marathi": "👮 *रेल्वे पोलीस (RPF)*\n\n┌─────────────────────┐\n  🚨 पोलिसांसाठी *139* किंवा *112* डायल करा\n  🛡️ तात्काळ सुरक्षा मदत\n└─────────────────────┘",
+                  }
+                  send_whatsapp(parent_phone, rpf_msgs.get(lang, rpf_msgs["English"]) + menu)
+                  Kestra.outputs({"action": "rpf_sent", "journey_id": str(jid)})
+
+              elif RAW_MSG == '8':
+                  # FOOD ORDERING
+                  food_msgs = {
+                      "English": "🍔 *IRCTC eCatering*\n\n┌─────────────────────┐\n  📞 Dial *1323* to order food\n  🌐 Visit: ecatering.irctc.co.in\n  📦 Delivered to your seat\n└─────────────────────┘",
+                      "Hindi":   "🍔 *IRCTC ई-केटरिंग*\n\n┌─────────────────────┐\n  📞 खाना ऑर्डर करने के लिए *1323* डायल करें\n  🌐 जाएं: ecatering.irctc.co.in\n  📦 आपकी सीट पर डिलीवरी\n└─────────────────────┘",
+                      "Marathi": "🍔 *IRCTC ई-कॅटरिंग*\n\n┌─────────────────────┐\n  📞 जेवण ऑर्डर करण्यासाठी *1323* डायल करा\n  🌐 भेट द्या: ecatering.irctc.co.in\n  📦 तुमच्या सीटवर डिलिव्हरी\n└─────────────────────┘",
+                  }
+                  send_whatsapp(parent_phone, food_msgs.get(lang, food_msgs["English"]) + menu)
+                  Kestra.outputs({"action": "food_info_sent", "journey_id": str(jid)})
+              elif RAW_MSG == '9':
+                  # AI STATION STORYTELLER
+                  t_stn = next_stn if next_stn else curr_stn if curr_stn else destination
+                  target_stn = t_stn.strip() if (t_stn and t_stn.strip()) else "Mumbai"
+                  story_prompt = (
+                      f"The user is on an Indian Railways train approaching the city/station: {target_stn}. "
+                      f"Write a fascinating, 2-sentence historical, cultural, or food fact about {target_stn} in {lang}. "
+                      f"Make it sound like a local guide telling a story. Include emojis. No markdown headers."
+                  )
+                  try:
+                      story = call_groq(story_prompt).strip()
+                  except Exception:
+                      story = "Every station in India has a hidden story waiting to be discovered!"
+                  
+                  story_msg = f"🎧 *AI Storyteller — {target_stn}*\n\n{story}"
+                  send_whatsapp(parent_phone, story_msg + menu)
+                  Kestra.outputs({"action": "story_sent", "journey_id": str(jid)})
+
+              elif RAW_MSG == '0':
+                  # AI TRAVEL GAMES & BOREDOM
+                  game_prompt = (
+                      f"The user is bored on a long Indian train journey on {train_no}. "
+                      f"Generate a fun, quick interactive text-based game, riddle, or unique Indian Railways trivia question in {lang}. "
+                      f"Keep it very short (3 sentences max). Make it engaging and fun! Include emojis."
+                  )
+                  try:
+                      game = call_groq(game_prompt).strip()
+                  except Exception:
+                      game = "Trivia: Did you know Indian Railways is the 4th largest railway network in the world? 🚂"
+                  
+                  game_msg = f"🎲 *Timepass — Travel Games*\n\n{game}"
+                  send_whatsapp(parent_phone, game_msg + menu)
+                  Kestra.outputs({"action": "game_sent", "journey_id": str(jid)})
+
+      else:
+          # ROUTE: New Journey Registration
+          example_json = '{"train_number":"12952","train_name":"Mumbai Rajdhani","destination":"Nagpur","language":"Hindi"}'
+          prompt = (
+              f"You are an Indian travel assistant. Extract details from this train journey message.\n"
+              f"Message: \"{RAW_MSG}\"\n\n"
+              f"Rules:\n"
+              f"- train_number: 5-digit Indian train number (string, digits only)\n"
+              f"- train_name: predict the real IRCTC train name using your knowledge of the train_number (e.g. Vidarbha Express)\n"
+              f"- destination: destination station name in English\n"
+              f"- language: detect from message — reply exactly one of: Hindi, Marathi, English\n"
+              f"  (default English if unclear)\n\n"
+              f"Reply ONLY with raw JSON, no markdown. Example: {example_json}"
+          )
+
+          try:
+              raw = call_groq(prompt).strip().replace('```json','').replace('```','').strip()
+              start  = raw.find('{')
+              end    = raw.rfind('}') + 1
+              parsed = json.loads(raw[start:end])
+              train_number = str(parsed.get('train_number', '')).strip()
+              train_name   = str(parsed.get('train_name', 'Train')).strip()
+              destination  = str(parsed.get('destination',  'your destination')).strip()
+              language     = str(parsed.get('language',     'English')).strip()
+              if language not in ('Hindi', 'Marathi', 'English'):
+                  language = 'English'
+          except Exception as e:
+              print(f"Groq parse error: {e} — using dynamic fallback")
+              words = RAW_MSG.replace(',','').split()
+              train_number = next((w for w in words if w.isdigit() and len(w) >= 4), '12952')
+              train_name = "Train"
+              
+              # Dynamic fallback heuristic
+              if any(ord(c) >= 2304 and ord(c) <= 2431 for c in RAW_MSG): # Devanagari block
+                  if 'आहे' in RAW_MSG or 'गाडी' in RAW_MSG or 'साठी' in RAW_MSG:
+                      language = 'Marathi'
+                  else:
+                      language = 'Hindi'
+              else:
+                  language = 'English'
+                  
+              destination = next((w for w in words if len(w) > 3 and not w.isdigit() and w.lower() not in ['train', 'going', 'to', 'the', 'am', 'reaching', 'towards', 'gaadi', 'jat', 'ahe']), words[-1] if words else 'your destination')
+
+          print(f"Parsed → Train: {train_number} | Dest: {destination} | Lang: {language}")
+
+          # Check for duplicate active journey
+          cur.execute(
+              "SELECT id FROM yg_journeys WHERE parent_phone=%s AND train_number=%s AND status='ACTIVE'",
+              (parent_phone, train_number)
+          )
+          existing = cur.fetchone()
+
+          if existing:
+              journey_id = existing[0]
+              print(f"Journey already active (id={journey_id})")
+          else:
+              cur.execute(
+                  """INSERT INTO yg_journeys
+                     (train_number, train_name, parent_phone, family_phone, destination, language)
+                     VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                  (train_number, train_name, parent_phone, FAMILY_PH, destination, language)
+              )
+              journey_id = cur.fetchone()[0]
+              conn.commit()
+              print(f"Journey saved → id={journey_id}")
+
+          # Send rich confirmation + interactive menu
+          menu = MENUS.get(language, MENUS["English"])
+          confirmations = {
+              "English": (
+                  f"🚂 *YatraGuard is now active!*\n\n"
+                  f"┌─────────────────────┐\n"
+                  f"  Train   : *{train_name} ({train_number})*\n"
+                  f"  Heading : *{destination}*\n"
+                  f"  Updates : Every 30 min\n"
+                  f"└─────────────────────┘\n\n"
+                  f"✅ We will send live updates and wake you up before arrival."
+              ),
+              "Hindi": (
+                  f"🚂 *YatraGuard चालू हो गई!*\n\n"
+                  f"┌─────────────────────┐\n"
+                  f"  ट्रेन   : *{train_name} ({train_number})*\n"
+                  f"  गंतव्य  : *{destination}*\n"
+                  f"  अपडेट  : हर 30 मिनट\n"
+                  f"└─────────────────────┘\n\n"
+                  f"✅ हम लाइव अपडेट भेजेंगे और स्टेशन आने से पहले जगाएंगे।"
+              ),
+              "Marathi": (
+                  f"🚂 *YatraGuard सुरू झाली!*\n\n"
+                  f"┌─────────────────────┐\n"
+                  f"  ट्रेन   : *{train_name} ({train_number})*\n"
+                  f"  गंतव्य  : *{destination}*\n"
+                  f"  अपडेट  : दर 30 मिनिट\n"
+                  f"└─────────────────────┘\n\n"
+                  f"✅ आम्ही लाइव्ह अपडेट पाठवू आणि स्टेशन येण्यापूर्वी जागे करू।"
+              ),
+          }
+
+          msg = confirmations.get(language, confirmations["English"]) + menu
+          try:
+              send_whatsapp(parent_phone, msg)
+              print(f"Confirmation + menu sent to {parent_phone}")
+          except Exception as e:
+              print(f"WhatsApp error: {e}")
+
+          Kestra.outputs({
+              "action":       "journey_registered",
+              "train_number": train_number,
+              "parent_phone": parent_phone,
+              "destination":  destination,
+              "language":     language,
+              "journey_id":   str(journey_id)
+          })
+
+      cur.close()
+      conn.close()
+
+  - id: log_done
+    type: io.kestra.plugin.core.log.Log
+    message: "✅ Ingest handled. Action: {{ outputs.route_and_handle.vars.action }}"
